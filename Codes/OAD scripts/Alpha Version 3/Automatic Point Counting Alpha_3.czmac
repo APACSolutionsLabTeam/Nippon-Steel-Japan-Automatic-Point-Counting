@@ -1,0 +1,961 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Script>
+  <Context>Zen26</Context>
+  <Version>1.0</Version>
+  <Language>Python</Language>
+  <Text>#######################################################
+## AUTOMATIC POINT COUNTING
+##
+## Macro name: AutomaticPointCounting.czmac (ZEN core)
+##
+## Author name: Evan Drake(USJBS01@RMSUS)
+##
+## Modified by: ZSPANIYA@APAC and ZSMMATHE@APAC Digital Solutions
+##
+## Required files: Sample Input Image
+##
+## LOAD IMAGE, EXECUTE THE MACRO 
+## GENERATE THE CORRESPONDING REPORT
+##
+## Copyright(C) 2020 by Carl Zeiss Microscopy GmbH.
+## Permission is granted to use, modify and distribute this code,
+## as long as this copyright notice remains part of the code.
+## 
+#######################################################
+##
+## Clear the ZEN macro editor
+Zen.Application.MacroEditor.ClearMessages()
+## Import required libraries
+from System.IO import File, Directory, FileInfo, Path
+import os
+import re
+import shutil
+import math
+import time
+## global variables
+pointCount = 0
+fldCount = 0
+FullAutoFlag = False
+desgrid = False
+cleanup = True
+##
+## User-defined function to create a directory if it does not exist
+def create_directory(createFolder):
+    ## check directory exists or not and create a new one
+    
+    if os.path.exists(createFolder):
+        shutil.rmtree(createFolder)
+        os.mkdir(createFolder)
+    else:
+        os.mkdir(createFolder)
+        #print("Destination Folder Created")
+##
+def rotate_2D_point(xy, pq, radians):
+    x, y = xy
+    p,q = pq
+     # Move point 'p' to center (p,q)
+    _px = x - p
+    _py = y - q
+    
+    # Rotate the point 'p' 
+    qx = (math.cos(radians) * _px) - (math.sin(radians) * _py)
+    qy = (math.sin(radians) * _px) + (math.cos(radians) * _py)
+   
+    qx = p + qx
+    qy = q + qy
+    
+    return qx, qy
+## User-defined function for automatic point counting using automatic threshold
+def auto_point_counting(image, grid_pts_x, grid_pts_y, InterestPhase):
+    global pointCount
+    pointCountSum = 0 
+    #image.Save(r'C:\Users\ZSPANIYA\Desktop\Image.tif')
+    ## Check if the image is RGB/Gray
+    num_channels =  image.Bounds.SizeC
+    if(num_channels&gt;1):
+        grayImage = Zen.Processing.Utilities.ChangePixelType(image, ZenPixelType.Gray8)
+    else:
+        grayImage = image
+    ## Otsu Thresholded Image 
+    OtsuThresholdedimage = Zen.Processing.Segmentation.ThresholdAutomatic(grayImage)
+    OtsuThresholdedimageArr = OtsuThresholdedimage.CopyPixelsToArray('X(%d)|Y(%d)' %(abs(grid_pts_x), abs(grid_pts_y)), ZenPixelType.Gray8)
+    ## Edge Image to check for boundary pixels 
+    edgeImage = Zen.Processing.Filter.Edges.GradientMax(OtsuThresholdedimage)
+    #edgeImage.Save(r'C:\Users\ZSPANIYA\Desktop\edgeImage.tif')  
+    edgeImageArr = edgeImage.CopyPixelsToArray('X(%d)|Y(%d)' %(abs(grid_pts_x), abs(grid_pts_y)), ZenPixelType.Gray8)
+    ## pointCount is incremented according to the following command
+    if(InterestPhase == 'Bright' and OtsuThresholdedimageArr[0]== 255) or ((InterestPhase == 'Dark' and OtsuThresholdedimageArr[0] == 0)):
+        if (edgeImageArr[0] == 255 ):
+           pointCount = pointCount + 0.5
+        else:
+            pointCount = pointCount + 1
+    pointCountSum = pointCountSum + pointCount
+    #print(pointCountSum)
+    return pointCountSum
+##
+## This function creates the annotations that make up the grid for point counting.
+## Some of these parameters aren't shown to the user but are there in case we want to add that functionality.
+def make_grid_annotations(image, num_pts_grd = 25, shape_of_grid = 'Square', x_dim_of_grid = 5, y_dim_of_grid = 5, number_of_circles = 2, rotate_angle = (math.pi/6), tilt_angle_x = 0, tilt_angle_y = 0, shift_x = 0, shift_y =0, InterestPhase = 'Dark', automode = True):
+    info = image.Metadata.GetAllMetadata()
+    global fldCount
+    print(rotate_angle)
+    ## Saving the subImages to the temperory directory
+    image.Save(destfolder + r'\SubImages\sub_images[dict_key]_'+ str(fldCount+1)+'.tif')  
+    #Zen.Application.ActiveWorkbench.SetOutputValue(sub_images[dict_key],'subImages'+str(fldCount))
+    #Zen.Application.ActiveDocument = sub_images[dict_key]
+    number_of_markers = num_pts_grd
+    dim = info['Dimensions']
+    splits_python = dim.split(')')
+    x_shape = [int(splt.split(',')[1]) for splt in splits_python if splt.count('X') &gt; 0][0]
+    y_shape = [int(splt.split(',')[1]) for splt in splits_python if splt.count('Y') &gt; 0][0]
+    print('x_shape', x_shape)
+    print('y_shape', y_shape)
+    #line_factor used to adjust the length of the line annotations based off the number of markers and if creating a circle grid the number of concentric circles
+    line_factor = math.sqrt(25.0/number_of_markers)
+    if shape_of_grid == 'Circle': 
+        line_factor *= math.sqrt(math.sqrt(num_pts_grd)/(2*number_of_circles))
+    len_line = int(min([x_shape,y_shape])/22 * line_factor)
+    if len_line &lt; 1:
+        len_line = 1
+    if shape_of_grid == 'Square':
+        #Here we are determining how to setup the grid, determine the spacing of the markers and where they should start/end
+        grid_x_shape = x_dim_of_grid
+        grid_y_shape = y_dim_of_grid
+        x_space_grid = float(x_shape/1.8)/grid_x_shape
+        #x_start_grid = round(x_space_grid/2)
+        #x_start_grid = round(2*x_space_grid)
+        x_start_grid = round(x_shape/4)
+        current_x = x_start_grid * 1
+        y_space_grid = float(y_shape/1.8)/grid_y_shape
+        #y_start_grid = round(y_space_grid/2)
+        #y_start_grid = round(2*y_space_grid)
+        y_start_grid = round(y_shape/4)
+        current_y = y_start_grid * 1
+        #print("grid_x_shape: %s   x_space_grid: %s" % (str(grid_x_shape),str(x_space_grid)))
+        #print("grid_y_shape: %s   y_space_grid: %s" % (str(grid_y_shape),str(y_space_grid)))
+        rot_factor_x = math.cos(tilt_angle_x * math.pi/180)
+        rot_factor_y = math.cos(tilt_angle_y * math.pi/180)
+        #print('rot_factor_x', rot_factor_x)
+        #print('rot_factor_y', rot_factor_y)
+        new_rot_method = True
+        horizontal_lines = []
+        vertical_lines = []
+        ## Create a list of lists that have the beginning and ending (x,y) points for the horizontal and vertical lines
+        current_x_lst = current_x * 1
+        current_y_lst = current_y * 1
+        for y_marker in range(grid_y_shape):
+            for x_marker in range(grid_x_shape):
+                horizontal_lines.append([[current_x_lst - len_line, current_y_lst],[current_x_lst + len_line, current_y_lst]])
+                vertical_lines.append([[current_x_lst, current_y_lst - len_line],[current_x_lst, current_y_lst + len_line]])
+                current_x_lst += x_space_grid
+            current_x_lst = x_start_grid * 1
+            current_y_lst += y_space_grid
+        ##             
+        ## Did some work on trying to tilt the annotations if user wanted. Created variables to adjust the tilt effect based on other parameters
+        if rot_factor_x &gt; 0:
+            x_tilt_factors = [math.sqrt(((x_shape-pairs[0][0])**rot_factor_x)/(x_shape-pairs[0][0])) for pairs in vertical_lines]
+        else:
+            rot_factor_x = abs(rot_factor_x)
+            x_tilt_factors = [math.sqrt(((pairs[0][0])**rot_factor_x)/(pairs[0][0])) for pairs in vertical_lines]
+        if rot_factor_y &gt; 0:
+            y_tilt_factors = [math.sqrt(((y_shape-pairs[0][-1])**rot_factor_y)/(y_shape-pairs[0][-1])) for pairs in horizontal_lines]
+        else:
+            rot_factor_y = abs(rot_factor_y)
+            y_tilt_factors = [math.sqrt(((pairs[0][-1])**rot_factor_y)/(pairs[0][-1])) for pairs in horizontal_lines]
+        try:
+            norm_x_tilt_factors = [(x_tilt - min(x_tilt_factors))/(max(x_tilt_factors) - min(x_tilt_factors)) for x_tilt in x_tilt_factors] #write something that as tilt angle is closer to 
+            mult_val_x = (1.5 ** ((tilt_angle_x)/90.0 - math.floor((tilt_angle_x)/90.01)) - 1) * 2
+            add_val_x = (1 - mult_val_x/2)/mult_val_x
+            new_x_tilt_factors = [(x + add_val_x) * mult_val_x for x in norm_x_tilt_factors] #1.333 = (1 + x) * y
+        except Exception as exc:
+            new_x_tilt_factors = x_tilt_factors * 1
+        try:
+            norm_y_tilt_factors = [(y_tilt - min(y_tilt_factors))/(max(y_tilt_factors) - min(y_tilt_factors)) for y_tilt in y_tilt_factors]
+            mult_val_y = (1.5 ** ((tilt_angle_y)/90.0 - math.floor((tilt_angle_y)/90.01)) - 1) * 2
+            add_val_y = (1 - mult_val_y/2)/mult_val_y
+            new_y_tilt_factors = [(y + add_val_y) * mult_val_y for y in norm_y_tilt_factors] #0.666 = (0 + x) * y
+        except Exception as exc:
+            new_y_tilt_factors = y_tilt_factors * 1
+        ##       
+        ## This nested for loop is where we actually draw the line annotation onto the image and any shifting or rotating of the annotations is done here.
+        grid_counter = 0
+        for y_marker in range(grid_y_shape):
+            for x_marker in range(grid_x_shape):
+                if new_rot_method: ## ----Could incorporate the shrinking of pts as they are rotating away (depth .&lt;] effect)----
+                    x_tilt_factor = new_x_tilt_factors[grid_counter]
+                    y_tilt_factor = new_y_tilt_factors[grid_counter]
+                    horiz_line = image.Graphics.Add(ZenGraphicCategory.Line)
+                    
+                    #shift_x = - grid_x_shape*0.1
+                    #shift_y = -grid_y_shape*0.5
+                    horiz_line.X1 = ((current_x - len_line) * rot_factor_x * x_tilt_factor) + shift_x
+                    horiz_line.Y1 = (current_y * rot_factor_y * y_tilt_factor) + shift_y
+                    horiz_line.X2 = ((current_x + len_line) * rot_factor_x * x_tilt_factor) + shift_x
+                    horiz_line.Y2 = (current_y * rot_factor_y * y_tilt_factor) + shift_y
+                    horiz_line.FontSize = 0
+                    
+                    vert_line = image.Graphics.Add(ZenGraphicCategory.Line)
+                    vert_line.X1 = (current_x * rot_factor_x * x_tilt_factor) + shift_x
+                    vert_line.Y1 = ((current_y - len_line) * rot_factor_y * y_tilt_factor) + shift_y
+                    vert_line.X2 = (current_x * rot_factor_x * x_tilt_factor) + shift_x
+                    vert_line.Y2 = ((current_y + len_line) * rot_factor_y * y_tilt_factor) + shift_y
+                    vert_line.FontSize = 0
+                    prev_grid_center = [int(x_shape/2), int(y_shape/2)]
+                    print(rotate_angle)
+                    horiz_line.X1, horiz_line.Y1 = rotate_2D_point([horiz_line.X1, horiz_line.Y1], [int(prev_grid_center[0]), int(prev_grid_center[1])], rotate_angle)
+                    horiz_line.X2, horiz_line.Y2 = rotate_2D_point([horiz_line.X2, horiz_line.Y2],  [int(prev_grid_center[0]), int(prev_grid_center[1])],rotate_angle )
+                    vert_line.X1, vert_line.Y1 = rotate_2D_point([vert_line.X1, vert_line.Y1],  [int(prev_grid_center[0]), int(prev_grid_center[1])],rotate_angle )
+                    vert_line.X2, vert_line.Y2 = rotate_2D_point([vert_line.X2, vert_line.Y2],  [int(prev_grid_center[0]), int(prev_grid_center[1])],rotate_angle )
+                              
+                else:
+                    horiz_line = image.Graphics.Add(ZenGraphicCategory.Line)
+                    horiz_line.X1 = ((current_x - len_line) * rot_factor_x) + shift_x
+                    horiz_line.Y1 = (current_y * rot_factor_y) + shift_y
+                    horiz_line.X2 = ((current_x + len_line) * rot_factor_x) + shift_x
+                    horiz_line.Y2 = (current_y * rot_factor_y) + shift_y
+                    horiz_line.FontSize = 0
+                    ##
+                    vert_line = image.Graphics.Add(ZenGraphicCategory.Line)
+                    vert_line.X1 = (current_x * rot_factor_x) + shift_x
+                    vert_line.Y1 = ((current_y - len_line) * rot_factor_y) + shift_y
+                    vert_line.X2 = (current_x * rot_factor_x) + shift_x
+                    vert_line.Y2 = ((current_y + len_line) * rot_factor_y) + shift_y
+                    vert_line.FontSize = 0
+                   
+                ##   
+                grid_counter += 1
+                #if current_y == y_start_grid:
+                    #print("current_y: %s    current_x: %s" % (str(current_y),str(current_x)))
+                ##    
+                ## If automode is True, the auto_point_counting function is invoked    
+                if automode == True:
+                   #pointCountSum = auto_point_counting(image, current_x, current_y, InterestPhase)
+                    pointCountSum = auto_point_counting(image, (horiz_line.X1+horiz_line.X2)/2, (vert_line.Y1+vert_line.Y2)/2, InterestPhase)
+                ##
+                current_x = (current_x + x_space_grid)
+            ##   
+            current_x = x_start_grid * 1
+            current_y = (current_y + y_space_grid)
+    ## 
+    if shape_of_grid == 'Circle':
+        ## Determines the largest radius that can be used when doing a circle grid and radius for each concentric circle in the grid.
+        biggest_radius = int(4.4*min([x_shape,y_shape])/10)
+        radiuses = [round(biggest_radius * (circ_num+1)/number_of_circles) for circ_num in range(number_of_circles)]
+        if (radiuses[-1] * 2) + (len_line*2) &gt; min([x_shape,y_shape]):
+            len_line = (min([x_shape,y_shape]) - (radiuses[-1] * 2))/2
+        ## Determines how many markers will be in each concentric cirlce
+        ## This ensures there to be at least 1 pt in each circle
+        num_pts_in_circles_base = [1 for circ_num in range(number_of_circles)]
+        num_pts_in_smlst_circ = float(num_pts_grd-number_of_circles)/sum([i+1 for i in range (number_of_circles)])
+        num_pts_in_circles = [int(num_pts_in_smlst_circ * (number_of_circles - i)) for i in range(number_of_circles)]
+        num_pts_in_circles = [num_pts_in_circles[i] + num_pts_in_circles_base[i] for i in range(len(num_pts_in_circles))]
+        ##
+        num_pts_left = num_pts_grd - sum(num_pts_in_circles)
+        list_to_add_to_num_pts_in_circles = [0 for i in range(len(num_pts_in_circles))]
+        pt_counter = 0
+        while num_pts_left &gt; 0:
+            pt_counter += 1
+            nums_to_add = 1
+            possib_nums = [2**i for i in range(1,number_of_circles)] #[2,4,8]
+            for possib_num in possib_nums:
+                if pt_counter % possib_num == 0:
+                    nums_to_add += 1
+            for num_to_add in range(nums_to_add):
+                list_to_add_to_num_pts_in_circles[num_to_add] += 1
+                num_pts_left -= 1
+                if num_pts_left &lt;= 0:
+                    break
+        ##
+        num_pts_in_circles = [num_pts_in_circles[i] + list_to_add_to_num_pts_in_circles[i] for i in range(len(num_pts_in_circles))]
+        ## Function that finds evenly spaced points along a circle to place markers.
+        def points_in_circ(rad,num_pts_in_circ=100):
+            return [(math.cos(2*math.pi/num_pts_in_circ*pt)*rad,math.sin(2*math.pi/num_pts_in_circ*pt)*rad) for pt in range(0,num_pts_in_circ+1)]
+        points_on_grid = [points_in_circ(int(radiuses[circ_num]), int(num_pts_in_circles[-(1+circ_num)])) for circ_num in range(int(number_of_circles))]
+        points_on_grid = [i[:-1] for i in points_on_grid]
+        ##       
+        ## This nested for loop is where we actually draw the line annotation onto the image and any shifting or rotating of the annotations is done here.
+        for points_of_circ in points_on_grid:
+            for coords in points_of_circ:
+                x_pt = coords[0]
+                y_pt = coords[1]
+                ##
+                ## Determines what the slope should be for the line annotations. 
+                try:
+                    slope = y_pt/x_pt
+                except:
+                    slope = 1000
+                try:
+                    slope_inv = -x_pt/y_pt
+                except:
+                    slope_inv = 1000
+                #print("x_pt: %s   y_pt: %s   slope: %s   slope_inv: %s" % (str(x_pt),str(y_pt),str(slope),str(slope_inv)))
+                #print("slope_inv == 0: %s   slope_inv == 1000: %s   slope == 0: %s   slope == 1000: %s" % (str(slope_inv == 0),str(slope_inv == 1000),str(slope == 0),str(slope == 1000)))
+                if round(slope_inv == 0) or round(slope_inv &gt;= 1000) or round(slope_inv &lt;= -1000) or round(slope == 0) or round(slope) &gt;= 1000 or round(slope) &lt;= -1000:
+                    #print("x_pt: %s   y_pt: %s" % (str(x_pt),str(y_pt)))
+                    para_line = image.Graphics.Add(ZenGraphicCategory.Line)
+                    para_line.X1 = x_pt + x_shape/2 + shift_x - len_line
+                    para_line.Y1 = y_pt + y_shape/2 + shift_y
+                    para_line.X2 = x_pt + x_shape/2 + shift_x + len_line
+                    para_line.Y2 = y_pt + y_shape/2 + shift_y
+                    para_line.FontSize = 0
+                    ##
+                    perp_line = image.Graphics.Add(ZenGraphicCategory.Line)
+                    perp_line.X1 = x_pt + x_shape/2 + shift_x
+                    perp_line.Y1 = y_pt + y_shape/2 + shift_y - len_line
+                    perp_line.X2 = x_pt + x_shape/2 + shift_x
+                    perp_line.Y2 = y_pt + y_shape/2 + shift_y + len_line
+                    perp_line.FontSize = 0
+                    ##             
+                else:
+                    slope_intercept = y_pt - (slope * x_pt)
+                    slope_intercept_inv = y_pt - (slope_inv * x_pt)
+                    #print("slope_intercept: %s    slope_intercept_inv: %s" % (str(slope_intercept),str(slope_intercept_inv)))
+                    X1_val_para = (-math.sqrt(-1*x_pt**2 * slope**2 + 2*x_pt*y_pt*slope - 2*x_pt*slope*slope_intercept - y_pt**2 + 2*y_pt*slope_intercept + slope**2 * len_line**2 + len_line**2 - slope_intercept**2) + x_pt + y_pt*slope - slope * slope_intercept)/(slope**2 + 1) #+ x_shape/2
+                    X2_val_para = (math.sqrt(-1*x_pt**2 * slope**2 + 2*x_pt*y_pt*slope - 2*x_pt*slope*slope_intercept - y_pt**2 + 2*y_pt*slope_intercept + slope**2 * len_line**2 + len_line**2 - slope_intercept**2) + x_pt + y_pt*slope - slope * slope_intercept)/(slope**2 + 1) #+ x_shape/2
+                    Y1_val_para = (X1_val_para * slope) #+ y_shape/2
+                    Y2_val_para = (X2_val_para * slope) #+ y_shape/2
+                    #print("X1_val_para: %s   X2_val_para: %s   Y1_val_para: %s   Y2_val_para: %s" % (str(X1_val_para),str(X2_val_para),str(Y1_val_para),str(Y2_val_para)))
+                    para_line = image.Graphics.Add(ZenGraphicCategory.Line)
+                    para_line.X1 = X1_val_para + x_shape/2 + shift_x
+                    para_line.Y1 = Y1_val_para + y_shape/2 + shift_y
+                    para_line.X2 = X2_val_para + x_shape/2 + shift_x
+                    para_line.Y2 = Y2_val_para + y_shape/2 + shift_y
+                    para_line.FontSize = 0
+                    ##
+                    slope_intercept_inv = y_pt - (slope_inv * x_pt)
+                    X1_val_perp = (-math.sqrt(-1*x_pt**2 * slope_inv**2 + 2*x_pt*y_pt*slope_inv - 2*x_pt*slope_inv*slope_intercept_inv - y_pt**2 + 2*y_pt*slope_intercept_inv + slope_inv**2 * len_line**2 + len_line**2 - slope_intercept_inv**2) + x_pt + y_pt*slope_inv - slope_inv * slope_intercept_inv)/(slope_inv**2 + 1)
+                    X2_val_perp = (math.sqrt(-1*x_pt**2 * slope_inv**2 + 2*x_pt*y_pt*slope_inv - 2*x_pt*slope_inv*slope_intercept_inv - y_pt**2 + 2*y_pt*slope_intercept_inv + slope_inv**2 * len_line**2 + len_line**2 - slope_intercept_inv**2) + x_pt + y_pt*slope_inv - slope_inv * slope_intercept_inv)/(slope_inv**2 + 1)
+                    Y1_val_perp = (X1_val_perp * slope_inv) + slope_intercept_inv
+                    Y2_val_perp = (X2_val_perp * slope_inv) + slope_intercept_inv
+                    #print("X1_val_perp: %s   X2_val_perp: %s   Y1_val_perp: %s   Y2_val_perp: %s" % (str(X1_val_perp),str(X2_val_perp),str(Y1_val_perp),str(Y2_val_perp)))
+                    perp_line = image.Graphics.Add(ZenGraphicCategory.Line)
+                    perp_line.X1 = X1_val_perp + x_shape/2 + shift_x 
+                    perp_line.Y1 = Y1_val_perp + y_shape/2 + shift_y
+                    perp_line.X2 = X2_val_perp + x_shape/2 + shift_x
+                    perp_line.Y2 = Y2_val_perp + y_shape/2 + shift_y
+                    perp_line.FontSize = 0
+                ##    
+                ## If automode is True, the auto_point_counting function is invoked
+                if automode == True:
+                     pointCount = auto_point_counting(image, (para_line.X1+para_line.X2)/2, (perp_line.Y1+perp_line.Y2)/2, InterestPhase)
+    ##  
+    ## Exporting the annotated subimages to the temperory directory
+    processingsetting1 = Zen.Processing.Utilities.Settings.SingleFileExportSetting(ZenExportFileType.TIFF)
+    processingsetting1.DestinationFolder = destfolder + r'\OverlaidImages'
+    processingsetting1.CreateFolder = False
+    processingsetting1.Prefix = 'sub_images[dict_key]_overlaid_'+ str(fldCount+1)
+    Zen.Processing.Utilities.ExportSingleFile(image, processingsetting1)    
+    fldCount = fldCount+1           
+## Returns estimated volume fraction, 95% confidence interface, relative accuracy, standard deviation and t value (which corresponds to the number of fields looked at determined by ASTM)
+def est_vol_frac_ra_ci_calcs(est_vol_frac_lst, field_counter, t_fields, t_vals):
+    est_vol_fract_sec = float(sum(est_vol_frac_lst))/len(est_vol_frac_lst)
+    if len(est_vol_frac_lst) == 1:
+        std = 0
+    else:
+        std = math.sqrt(sum([(est_vol_fract_sec - est_vol_frac_1)**2 for est_vol_frac_1 in est_vol_frac_lst])/(len(est_vol_frac_lst)-1))
+    if t_fields.count(field_counter) &gt; 0:
+        t_field_ind = t_fields.index(field_counter)
+        t_val = t_vals[t_field_ind]
+        #print("t_val: %s" % str(t_val))
+    elif field_counter &gt; t_fields[-1]:
+        t_val = t_vals[-1]
+        #print("t_val: %s" % str(t_val))
+    elif field_counter &lt; t_fields[0]:
+        t_val = t_vals[0]
+        #print("t_val: %s" % str(t_val))
+    else:
+        min_field = max([i for i in t_fields if i &lt; field_counter])
+        max_field = min([i for i in t_fields if i &gt; field_counter])
+        t_field_min_ind = t_fields.index(min_field)
+        t_field_max_ind = t_fields.index(max_field)
+        t_val_min = t_vals[t_field_min_ind]
+        t_val_max = t_vals[t_field_max_ind]
+        t_val = t_val_min + ((t_val_max-t_val_min) * (field_counter-t_field_min_ind)/(t_field_max_ind-t_field_min_ind))
+    CI_95 = t_val * std/math.sqrt(field_counter)
+    print("CI_95: %s" % str(CI_95))
+    rel_acc = (CI_95/est_vol_fract_sec) * 100
+    est_vol_fract_sec = round(est_vol_fract_sec,4)
+    rel_acc = round(rel_acc,4)
+    return est_vol_fract_sec, rel_acc, CI_95, std, t_val 
+##
+image = Zen.Application.ActiveWorkbench.GetDefaultInputValue()
+##
+## Creates windows for user to input some values.
+window = ZenWindow()
+window.AddTextBox('sample_name','Sample Name:', 'sample')
+window.AddDropDown('volfrac','Estimated Volume Fraction:', ['&lt;2%', '&lt;5%','&lt;10%', '&lt;20%', '&gt;20%'], 3)
+window.AddDropDown('prfacc','Preferred Relative Accuracy:', ['10%', '20%','33%'], 1)
+window.AddTextBox('nmpts','Number of points on grid:', 25)
+#window.AddCheckbox('calcnumfld','Calculate number of fields:',False)
+window.AddTextBox('numfld','Number of fields:',5)
+window.AddDropDown('detMethod','Please choose the Point Counting Method:', ['Manual', 'Semi-automatic','Automatic'], 1)
+result=window.Show()
+##
+## Checks if Cancel button was clicked
+if result.HasCanceled == True:
+    sys.exit('Macro aborted with Cancel!')
+sample_name = result.GetValue('sample_name')
+num_pts = result.GetValue('nmpts')
+##
+volfrac = result.GetValue('volfrac')
+detMethod = result.GetValue('detMethod')
+if len(volfrac) == 3:
+    volfrac_num = int(volfrac[1])
+    volfrac_num_calc = volfrac_num * 0.75
+    volfrac_ind = 0
+    if volfrac.count('5') &gt; 0:
+        volfrac_ind = 1
+else:
+    volfrac_num = int(volfrac[1:3])
+    if volfrac.count('&gt;') == 0:
+        volfrac_num_calc = volfrac_num * 0.75
+        volfrac_ind = 2
+        if volfrac.count('2') &gt; 0:
+            volfrac_ind = 3
+    else:
+        volfrac_ind = 4
+        volfrac_num_calc = volfrac_num * 1.5
+##
+prfacc = result.GetValue('prfacc')
+prfacc_num = int(prfacc[:2])
+if prfacc.count('1') &gt; 0:
+    prfacc_ind = 0
+elif prfacc.count('2') &gt; 0:
+    prfacc_ind = 1
+else:
+    prfacc_ind = 2
+pred_num_fields = round((4/(((prfacc_num * 0.01)**2) * num_pts)) * ((100 - volfrac_num_calc)/volfrac_num_calc))
+if pred_num_fields &lt; 5:
+    pred_num_fields = 5
+numfld = result.GetValue('numfld')
+##
+## Minimum number of fields is 5
+if numfld &lt; 5:
+    window = ZenWindow()
+    window.AddLabel('5 fields is the minimum. Changing the number of fields to 5. ')
+    result1_5 = window.Show()
+    numfld = 5
+##
+info = image.Metadata.GetAllMetadata()
+dim = info['Dimensions']
+splits_python = dim.split(')')
+x_shape = [int(splt.split(',')[1]) for splt in splits_python if splt.count('X') &gt; 0][0]
+y_shape = [int(splt.split(',')[1]) for splt in splits_python if splt.count('Y') &gt; 0][0]
+factor_of_dim = y_shape/(x_shape * 1.0)
+## Creates an array of subimages of the original input image greater than or equal to the number of fields determined above. Determiens array shape by the x and y shape ratio of the original image and the number of fields
+array_of_fields_x = math.sqrt(numfld/factor_of_dim)
+array_of_fields_y = array_of_fields_x * factor_of_dim
+if round(array_of_fields_x) * round(array_of_fields_y) &lt; numfld:
+    if (round(array_of_fields_x)+1) - array_of_fields_x &lt; (round(array_of_fields_y)+1) - array_of_fields_y:
+        array_of_fields_x += 1
+    else:
+        array_of_fields_y += 1
+array_of_fields_x = int(round(array_of_fields_x))
+array_of_fields_y = int(round(array_of_fields_y))
+if (array_of_fields_x - 1) * array_of_fields_y &gt;= numfld:
+    array_of_fields_x -= 1
+elif array_of_fields_x * (array_of_fields_y-1) &gt;= numfld:
+    array_of_fields_y -= 1
+x_size_field = int(x_shape/array_of_fields_x)
+y_size_field = int(y_shape/array_of_fields_y)
+#print("x_size_field: %s" % str(x_size_field))
+#print("y_size_field: %s" % str(y_size_field))
+cur_subimage_xstart = 0
+cur_subimage_ystart = 0
+## These values are from the ASTM 
+t_fields = [5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,40,60,280]
+t_vals = [2.776,2.571,2.447,2.365,2.306,2.262,2.228,2.201,2.179,2.16,2.145,2.131,2.12,2.11,2.101,2.093,2.086,2.08,2.074,2.069,2.064,2.06,2.056,2.052,2.048,2.045,2.02,2,1.96] 
+## Initialize the variables
+sub_images = {}
+field_counter = 0 
+nmpts_pi_lst = []
+num_grid_pts_lst = []
+est_vol_frac_lst = []
+done_at_least_1 = False
+surnomreflds_tf = False
+mreflds = True
+##
+## Create directory for destination folder, SubImages, Overlaid Images and Tables
+destfolder = r'C:/Temp/AutomaticPointCounting'
+#if cleanup:
+  #print 'Deleting Folder : ', destfolder
+  #Directory.Delete(destfolder, True)
+create_directory(destfolder)  
+create_directory(destfolder + r'\SubImages')
+create_directory(destfolder + r'\OverlaidImages')
+create_directory(destfolder + r'\Tables')
+## This nested for loop goes through all the subimages and lets you choose grid shape/size and input the number of grid points that overlay constituent or phase of interest if field_counter&lt;= number of fields
+if(field_counter&lt;=numfld):
+    for sub_img_iter_y in range(array_of_fields_y):
+        for sub_img_iter_x in range(array_of_fields_x):
+            field_counter += 1
+            global pointCount
+            pointCount = 0
+            grdshp_ind = 0
+            str_coords_subimage = 'X(%s,%s)|Y(%s,%s)' % (str(cur_subimage_xstart),str(cur_subimage_xstart + x_size_field),str(cur_subimage_ystart),str(cur_subimage_ystart+y_size_field))
+            dict_key = 'X_%s_%s_Y_%s_%s)' % (str(cur_subimage_xstart),str(cur_subimage_xstart + x_size_field),str(cur_subimage_ystart),str(cur_subimage_ystart+y_size_field))
+            ## print("str_coords_subimage: %s" % str(str_coords_subimage))
+            sub_images[dict_key] = image.CreateSubImage(str_coords_subimage)
+            
+            ##Zen.Application.ActiveWorkbench.SetOutputValue(sub_images[dict_key],'subImages'+str(fldCount))
+            ##Zen.Application.ActiveDocument = sub_images[dict_key]
+            
+            
+            try:
+                if desgrid != True:
+                    while True:
+                        ## print("desgrid: %s" % str(desgrid))
+                        if detMethod == 'Manual':
+                            print('Manual')
+                            #done_at_least_1 = True
+                            ## Creates a gui that allows user to customize shape/size of grid
+                            window = ZenWindow()    
+                            window.AddDropDown('grdshp','Grid Shape:', ['Square', 'Circle'], 0)
+                            window.AddTextBox('nmpts','Number of points on grid:', num_pts)
+                            window.AddLabel('---Applies if shape is square---')#If the grid shape is chosen to be a square these\ntwo fields will set the dimensions of the grid.')
+                            window.AddTextBox('grdszx','Grid Size in X Dimension:', grdszx)
+                            window.AddTextBox('grdszy','Grid Size in Y Dimension:', grdszy)
+                            window.AddIntegerRange('rotation_angle', 'Rotate Grid in degrees', 30, 0, 360)
+                            window.AddLabel('---Applies if shape is circle---')#If the grid shape is chosen to be a square these\ntwo fields will set the dimensions of the grid.')
+                            window.AddTextBox('numcrc','Number of concentric circles to make up grid:', numcrc)
+                            window.AddCheckbox('desgrid','Use this same grid for all fields:', False)
+                            result2=window.Show()
+                            desgrid = result2.GetValue('desgrid')
+                            #desgrid = False
+                            automode = False
+                            InterestPhase = 'Dark'
+                    
+                        elif detMethod == 'Semi-automatic':
+                            #done_at_least_1 = True
+                            ## Creates a gui that allows user to customize shape/size of grid
+                            #print('field_counter', field_counter)
+                            if field_counter &gt; numfld:
+                                break
+                            window = ZenWindow()    
+                            window.AddDropDown('grdshp','Grid Shape:', ['Square', 'Circle'], grdshp_ind)
+                            window.AddTextBox('nmpts','Number of points on grid:', num_pts)
+                            window.AddLabel('---Applies if shape is square---')#If the grid shape is chosen to be a square these\ntwo fields will set the dimensions of the grid.')
+                            window.AddTextBox('grdszx','Grid Size in X Dimension:', grdszx)
+                            window.AddTextBox('grdszy','Grid Size in Y Dimension:', grdszy)
+                            window.AddIntegerRange('rotation_angle', 'Rotate Grid in degrees', 30, 0, 360)
+                            window.AddLabel('---Applies if shape is circle---')#If the grid shape is chosen to be a square these\ntwo fields will set the dimensions of the grid.')
+                            window.AddTextBox('numcrc','Number of concentric circles to make up grid:', numcrc)
+                            window.AddCheckbox('desgrid','Use this same grid for all fields:', False)
+                            window.AddCheckbox('automode','Use Automatic Point Counting:', True)
+                            result2=window.Show() 
+                            desgrid = result2.GetValue('desgrid')
+                            automode = result2.GetValue('automode')
+                        else:
+                            print('Automatic')
+                            FullAutoFlag = True
+                            
+                            window = ZenWindow()   
+                            window.AddDropDown('InterestPhaseAuto','Interested Phase:', ['Dark', 'Bright'], 0)
+                            window.AddDropDown('grdshp','Grid Shape:', ['Square', 'Circle'], grdshp_ind)
+                            window.AddTextBox('nmpts','Number of points on grid:', num_pts)
+                            window.AddLabel('---Applies if shape is square---')#If the grid shape is chosen to be a square these\ntwo fields will set the dimensions of the grid.')
+                            window.AddTextBox('grdszx','Grid Size in X Dimension:', grdszx)
+                            window.AddTextBox('grdszy','Grid Size in Y Dimension:', grdszy)
+                            window.AddIntegerRange('rotation_angle', 'Rotate Grid in degrees', 30, 0, 360)
+                            window.AddLabel('---Applies if shape is circle---')#If the grid shape is chosen to be a square these\ntwo fields will set the dimensions of the grid.')
+                            window.AddTextBox('numcrc','Number of concentric circles to make up grid:', numcrc)
+                            window.AddLabel('NOTE: The shape and tilt of the grid and the Interested Phase will remain same for all the fields being analyzed in the Automatic Mode')
+                            #window.AddCheckbox('desgrid','Use this same grid for all fields:', False)
+                            #window.AddCheckbox('automode','Use Automatic Point Counting:', True)
+                            result2=window.Show() 
+                            desgrid = True
+                            automode = True
+                            InterestPhaseAuto = result2.GetValue('InterestPhaseAuto')
+                            InterestPhase = InterestPhaseAuto
+                            
+                        if result2.HasCanceled == True:
+                            sys.exit('Macro aborted with Cancel!')
+                        num_pts = result2.GetValue('nmpts')
+                        grdszx = result2.GetValue('grdszx')
+                        grdszy = result2.GetValue('grdszy')
+                        rotation_angle = result2.GetValue('rotation_angle')
+                        numcrc = int(result2.GetValue('numcrc'))
+                        grdshp = result2.GetValue('grdshp')
+                        #desgrid = result2.GetValue('desgrid')
+                        #automode = result2.GetValue('automode')
+                        #grdshp_ind = 0
+                        if grdshp.count("Circle") &gt; 0:
+                            grdshp_ind = 1
+                        if num_pts != (grdszx * grdszy) and grdshp_ind == 0:
+                            exc2 = 'Dimensions of grid and number of grid points do not match.'
+                            window2_5 = ZenWindow()
+                            window2_5.AddLabel(exc2)
+                            result2_5 = window2_5.Show()
+                            continue
+                        if num_pts &lt; numcrc and grdshp_ind == 1:
+                            exc2 = 'Number of points on grid is less than the number of circles, please change one and try again.'
+                            window2_5 = ZenWindow()
+                            window2_5.AddLabel(exc2)
+                            result2_5 = window2_5.Show()
+                            continue
+                        if automode == False:
+                           InterestPhase = 'Dark'
+                           break
+                        if FullAutoFlag == False and automode == True:
+                            window2_5 = ZenWindow()
+                            window2_5.AddDropDown('InterestPhase','Interested Phase:', ['Dark', 'Bright'], 0)
+                            result2_5 = window2_5.Show()
+                            InterestPhase = result2_5.GetValue('InterestPhase')
+                            break
+                        break
+                else:
+                    pass
+            except Exception as exc:
+                while True:
+                    if done_at_least_1:
+                        sys.exit(exc)
+                    factors_of_num_pts = []
+                    for i in range(1,num_pts+1):
+                        if num_pts % i == 0:
+                            other_factor = num_pts/i
+                            factors_of_num_pts.append([i,other_factor])
+                    print(factors_of_num_pts)
+                    grdszx, grdszy = factors_of_num_pts[int(len(factors_of_num_pts)/2)]
+                    numcrc = int(round((num_pts**0.5)/2))
+                    
+                    if detMethod == 'Manual':
+                            print('Manual')
+                            #done_at_least_1 = True
+                            ## Creates a gui that allows user to customize shape/size of grid
+                            window = ZenWindow()    
+                            window.AddDropDown('grdshp','Grid Shape:', ['Square', 'Circle'], 0)
+                            window.AddTextBox('nmpts','Number of points on grid:', num_pts)
+                            window.AddLabel('---Applies if shape is square---')#If the grid shape is chosen to be a square these\ntwo fields will set the dimensions of the grid.')
+                            window.AddTextBox('grdszx','Grid Size in X Dimension:', grdszx)
+                            window.AddTextBox('grdszy','Grid Size in Y Dimension:', grdszy)
+                            window.AddIntegerRange('rotation_angle', 'Rotate Grid in degrees', 30, 0, 360)
+                            window.AddLabel('---Applies if shape is circle---')#If the grid shape is chosen to be a square these\ntwo fields will set the dimensions of the grid.')
+                            window.AddTextBox('numcrc','Number of concentric circles to make up grid:', numcrc)
+                            window.AddCheckbox('desgrid','Use this same grid for all fields:', False)
+                            result2=window.Show()
+                            desgrid = result2.GetValue('desgrid')
+                            desgrid = False
+                            automode = False
+                            InterestPhase = 'Dark'
+                    
+                    elif detMethod == 'Semi-automatic':
+                            print('Semi-automatic')
+                            #done_at_least_1 = True
+                            #grdshp_ind = 0
+                            ## Creates a gui that allows user to customize shape/size of grid
+                            
+                            window = ZenWindow()    
+                            window.AddDropDown('grdshp','Grid Shape:', ['Square', 'Circle'], grdshp_ind)
+                            window.AddTextBox('nmpts','Number of points on grid:', num_pts)
+                            window.AddLabel('---Applies if shape is square---')#If the grid shape is chosen to be a square these\ntwo fields will set the dimensions of the grid.')
+                            window.AddTextBox('grdszx','Grid Size in X Dimension:', grdszx)
+                            window.AddTextBox('grdszy','Grid Size in Y Dimension:', grdszy)
+                            window.AddIntegerRange('rotation_angle', 'Rotate Grid in degrees', 30, 0, 360)
+                            window.AddLabel('---Applies if shape is circle---')#If the grid shape is chosen to be a square these\ntwo fields will set the dimensions of the grid.')
+                            window.AddTextBox('numcrc','Number of concentric circles to make up grid:', numcrc)
+                            window.AddCheckbox('desgrid','Use this same grid for all fields:', False)
+                            window.AddCheckbox('automode','Use Automatic Point Counting:', True)
+                            result2=window.Show()  
+                            desgrid = result2.GetValue('desgrid')
+                            automode = result2.GetValue('automode')
+                    else:
+                            print('Automatic')
+                            FullAutoFlag = True
+                            #grdshp_ind = 0
+                            window = ZenWindow()   
+                            window.AddDropDown('InterestPhaseAuto','Interested Phase:', ['Dark', 'Bright'], 0)
+                            window.AddDropDown('grdshp','Grid Shape:', ['Square', 'Circle'], grdshp_ind)
+                            window.AddTextBox('nmpts','Number of points on grid:', num_pts)
+                            window.AddLabel('---Applies if shape is square---')#If the grid shape is chosen to be a square these\ntwo fields will set the dimensions of the grid.')
+                            window.AddTextBox('grdszx','Grid Size in X Dimension:', grdszx)
+                            window.AddTextBox('grdszy','Grid Size in Y Dimension:', grdszy)
+                            window.AddIntegerRange('rotation_angle', 'Rotate Grid in degrees', 30, 0, 360)
+                            window.AddLabel('---Applies if shape is circle---')#If the grid shape is chosen to be a square these\ntwo fields will set the dimensions of the grid.')
+                            window.AddTextBox('numcrc','Number of concentric circles to make up grid:', numcrc)
+                            window.AddLabel('NOTE: The shape and tilt of the grid and the Interested Phase will remain same for all the fields being analyzed in the Automatic Mode')
+                            #window.AddCheckbox('desgrid','Use this same grid for all fields:', False)
+                            #window.AddCheckbox('automode','Use Automatic Point Counting:', True)
+                            result2=window.Show() 
+                            desgrid = True
+                            automode = True
+                            InterestPhaseAuto = result2.GetValue('InterestPhaseAuto')
+                            InterestPhase = InterestPhaseAuto
+                            
+                    if result2.HasCanceled == True:
+                        sys.exit('Macro aborted with Cancel!')
+                    num_pts = result2.GetValue('nmpts')
+                    grdszx = result2.GetValue('grdszx')
+                    grdszy = result2.GetValue('grdszy')
+                    rotation_angle = result2.GetValue('rotation_angle')
+                    numcrc = int(result2.GetValue('numcrc'))
+                    grdshp = result2.GetValue('grdshp')
+                    
+                    grdshp_ind = 0
+                    if grdshp.count("Circle") &gt; 0:
+                        grdshp_ind = 1
+                    if num_pts != (grdszx * grdszy) and grdshp_ind == 0:
+                        window2_5 = ZenWindow()
+                        window2_5.AddLabel('Dimensions of grid and number of grid points do not match.')
+                        result2_5 = window2_5.Show()
+                        continue
+                    if num_pts &lt; numcrc and grdshp_ind == 1:
+                        window2_5 = ZenWindow()
+                        window2_5.AddLabel('Number of points on grid is less than the number of circles, please change one and try again.')
+                        result2_5 = window2_5.Show()
+                        continue
+                    if automode == False:
+                       InterestPhase = 'Dark'
+                       break
+                    if FullAutoFlag == False and automode == True:
+                        window2_5 = ZenWindow()
+                        window2_5.AddDropDown('InterestPhase','Interested Phase:', ['Dark', 'Bright'], 0)
+                        result2_5 = window2_5.Show()
+                        InterestPhase = result2_5.GetValue('InterestPhase')
+                        break   
+                    break
+            ##
+            ## Overlay the grid annotations on the subimage in orderr to facilitate the point counting process
+            make_grid_annotations(sub_images[dict_key], num_pts_grd = num_pts, shape_of_grid = grdshp, x_dim_of_grid = grdszx, y_dim_of_grid = grdszy, number_of_circles = numcrc, rotate_angle = rotation_angle*(math.pi/180), InterestPhase = InterestPhase, automode = automode)
+            ##
+            ## Set the annotaed subimages to workbench (to be included in the report)
+            ## Zen.Application.ActiveWorkbench.SetOutputValue(sub_images[dict_key],'subImages_overlaid'+str(fldCount))
+            ## Zen.Application.ActiveDocument = sub_images[dict_key]
+            ##
+            ## ## Create ZenTable for Overview Table
+            
+            overview_table = ZenTable()
+            overview_table.Columns.Add('Sample Name')
+            overview_table.Columns.Add('Number of fields analyzed')
+            overview_table.Columns.Add('Total number of points overlaying phase of interest')
+            overview_table.Columns.Add('Total number of points looked at')
+            overview_table.Columns.Add('95% Confidence Interval')
+            overview_table.Columns.Add('Estimated Volume Fraction %')
+            overview_table.Columns.Add('Standard Deviation')
+            overview_table.Columns.Add('Relative Accuracy %')
+            
+            ##
+            ## Create ZenTable for Total individual measurements
+            individual_measurements_Total = ZenTable()
+            individual_measurements_Total.Columns.Add('Field Number')
+            individual_measurements_Total.Columns.Add('Number of points overlaying phase of interest')
+            individual_measurements_Total.Columns.Add('Number of points on grid')
+            individual_measurements_Total.Columns.Add('Estimated volume fraction for this field')
+            ##
+            ## Create ZenTable for individual measurements
+            individual_measurements = ZenTable()
+            individual_measurements.Columns.Add('Field Number')
+            individual_measurements.Columns.Add('Number of points overlaying phase of interest')
+            individual_measurements.Columns.Add('Number of points on grid')
+            individual_measurements.Columns.Add('Estimated volume fraction for this field')
+            ##
+            ## GUI that allows user to input number of points lying on constituent/phase of interest
+            
+            if FullAutoFlag == False:
+                 if field_counter &gt; numfld:
+                    break
+                 window = ZenWindow()
+                 window.AddImage2dView(sub_images[dict_key])
+                 window.AddLabel('Analyzing field '+ str(field_counter) + ' of ' + str(numfld) + ' fields')
+                 window.AddLabel('Points on the boundaries are counted as 1/2')
+                 if not automode:
+                      window.AddTextBox('nmpts_pi','Number of points on lying on phase of interest:', 0.0)
+                 window.AddCheckbox('nomreflds','Im done looking at fields:', False)
+                 if desgrid:
+                      window.AddCheckbox('desgrid3','Edit the grid again:', False)
+                 result3=window.Show()
+                 if result3.HasCanceled == True:
+                      sys.exit('Macro aborted with Cancel!')
+                 nomreflds =  result3.GetValue('nomreflds')   
+                 if not automode:
+                     nmpts_pi = result3.GetValue('nmpts_pi')
+                 else:    
+                     nmpts_pi = pointCount
+                    
+                 desgrid3 = result3.GetValue('desgrid3')
+                 if desgrid3:
+                      desgrid = False
+                 
+            else:
+             
+                 nmpts_pi = pointCount
+                 Zen.Application.ProgressInfo.Show('Analyzing field '+ str(field_counter)+ ' of ' + str(numfld))
+            
+            nmpts_pi_lst.append(nmpts_pi)
+            num_grid_pts_lst.append(num_pts)
+            est_vol_frac_lst.append((nmpts_pi*100.0)/num_pts)
+            
+            ## The following if statements are to catch if there are either no more fields left to look at, the user doesnt want to look at any more, or the number of fields determined earlier has been reached. It'll create a GUI displaying the confidence interval, estimated volume fraction, and relative accuracy
+            
+            if field_counter == array_of_fields_x*array_of_fields_y:
+                print("array_of_fields_x: %s" % str(array_of_fields_x))
+                print("array_of_fields_y: %s" % str(array_of_fields_y))
+                print("est_vol_frac_lst: %s" % str(est_vol_frac_lst))
+                est_vol_fract_sec, rel_acc, CI_95, std, t_val = est_vol_frac_ra_ci_calcs(est_vol_frac_lst, field_counter, t_fields, t_vals)
+                est_vol_fract_sec_str = 'Estimated Volume Fraction: %s' % str(est_vol_fract_sec)
+                rel_acc_str = 'Relative Accuracy: %s' % str(rel_acc)
+                #Zen.Application.ProgressInfo.Show('Analyzing '+ str(field_counter)+ ' of ' + str(numfld))
+                window = ZenWindow()
+                window.AddLabel('You looked at all the fields in this section.')
+                window.AddLabel(est_vol_fract_sec_str)
+                window.AddLabel(rel_acc_str)
+                result4=window.Show()
+                break
+              
+            ## If no more fields
+            if FullAutoFlag == False:
+                if nomreflds:
+                    #print("est_vol_frac_lst: %s" % str(est_vol_frac_lst))
+                    est_vol_fract_sec, rel_acc, CI_95, std, t_val = est_vol_frac_ra_ci_calcs(est_vol_frac_lst, field_counter, t_fields, t_vals)
+                    est_vol_fract_sec_str = 'Current Estimated Volume Fraction: %s' % str(est_vol_fract_sec) + '%'
+                    rel_acc_str = 'Current Relative Accuracy: %s' % str(rel_acc) + '%'
+                    #Zen.Application.ProgressInfo.Show('Analyzing '+ str(field_counter)+ ' of ' + str(numfld))
+                    window = ZenWindow()
+                    window.AddLabel(est_vol_fract_sec_str)
+                    window.AddLabel(rel_acc_str)
+                    window.AddDropDown('surnomreflds', 'Do you want to look at more fields?', ['No', 'Yes, I want to look at more'], 0)
+                    result4=window.Show()   
+                    surnomreflds = result4.GetValue('surnomreflds')
+                    surnomreflds_tf = str(surnomreflds) == 'No'
+                    if surnomreflds_tf:
+                       break
+                    
+                
+            ## field_counter &gt;= number of fields
+            if field_counter &gt;= numfld:
+                est_vol_fract_sec, rel_acc, CI_95, std, t_val = est_vol_frac_ra_ci_calcs(est_vol_frac_lst, field_counter, t_fields, t_vals)
+                est_vol_fract_sec_str = 'Current Estimated Volume Fraction: %s' % str(est_vol_fract_sec) + '%'
+                rel_acc_str = 'Current Relative Accuracy: %s' % str(rel_acc) + '%'
+                window = ZenWindow()
+                window.AddLabel(est_vol_fract_sec_str)
+                window.AddLabel(rel_acc_str)
+                if detMethod == 'Manual':
+                    window.AddDropDown('mreflds', 'Do you want to look at more fields?', ['No', 'Yes, I want to look at more'], 0)
+                else:
+                    window.AddLabel('You looked at all the fields in this section.')
+                    mreflds == "No"
+                result5=window.Show()
+                if FullAutoFlag == False:
+                    mreflds = result5.GetValue('mreflds')
+                    ## If there are more fields to analyze
+                    if mreflds == "No":
+                       mreflds = False
+                    else:
+                       mreflds = True
+                        
+                    if mreflds:
+                        pass
+                    else:
+                           break
+                else:  
+                     break
+            else:
+                if field_counter &gt; numfld:
+                    pass
+            ##
+            ## Set the values for individual_measurements table
+            individual_measurements.SetValue(0, 0, field_counter)
+            individual_measurements.SetValue(0, 1, str(nmpts_pi_lst[field_counter-1]))
+            individual_measurements.SetValue(0, 2, str(num_grid_pts_lst[field_counter-1]))
+            individual_measurements.SetValue(0, 3, str(round(est_vol_frac_lst[field_counter-1],3)))
+            ## Saving the individual_measurements tables to the temperory directory
+            individual_measurements.Save(destfolder + r'\Tables\individual_measurements'+ str(fldCount)+'.csv')   
+            ## Set the individual_measurements table to active Workbench
+            ##Zen.Application.ActiveWorkbench.SetOutputValue(individual_measurements,'individual_measurements'+ str(fldCount))
+            ##Zen.Application.ActiveDocument = individual_measurements
+            ## Update the starting position of next subimage to be analyzed
+            cur_subimage_xstart += x_size_field
+        try:
+            if (field_counter &gt;= numfld and mreflds==False) or (field_counter == array_of_fields_x*array_of_fields_y) or (surnomreflds_tf): #update: This should be fixed....this can give an error when the number of fields specified is the total number of fields made and looked at so "field_counter &gt;= numfld" is never true and mreflds is never defined
+                break
+        except:
+            pass
+        cur_subimage_xstart = 0
+        cur_subimage_ystart += y_size_field
+    ##
+    ## Set values for the overview table
+    overview_table.SetValue(0, 0, sample_name)
+    if detMethod == 'Semi-automatic':
+        overview_table.SetValue(0, 1, field_counter-1)
+    else:    
+        overview_table.SetValue(0, 1, field_counter)
+    overview_table.SetValue(0, 2, sum(nmpts_pi_lst))
+    overview_table.SetValue(0, 3, sum(num_grid_pts_lst))
+    overview_table.SetValue(0, 4, round(CI_95, 4))
+    overview_table.SetValue(0, 5, round(est_vol_fract_sec, 4))
+    overview_table.SetValue(0, 6, round(std,4))
+    overview_table.SetValue(0, 7, rel_acc)
+    ## Set values for the individual measurements table.
+    
+    #print(nmpts_pi_lst)
+    if detMethod == 'Semi-automatic':
+    
+        if field_counter &gt;=numfld:
+            individual_measurements.SetValue(0, 0, field_counter-1)
+            individual_measurements.SetValue(0, 1, str(nmpts_pi_lst[field_counter-2]))
+            individual_measurements.SetValue(0, 2, str(num_grid_pts_lst[field_counter-2]))
+            individual_measurements.SetValue(0, 3, str(round(est_vol_frac_lst[field_counter-2],3)))
+            individual_measurements.Save(destfolder +r'\Tables\individual_measurements'+str(fldCount-1)+'.csv')
+            
+            for i in range(field_counter-1):
+                individual_measurements_Total.SetValue(i, 0, str(i+1))
+                individual_measurements_Total.SetValue(i, 1, str(nmpts_pi_lst[i]))
+                individual_measurements_Total.SetValue(i, 2, str(num_grid_pts_lst[i]))
+                individual_measurements_Total.SetValue(i, 3, str(round(est_vol_frac_lst[i],3)))
+            
+        else:   
+            individual_measurements.SetValue(0, 0, field_counter)
+            individual_measurements.SetValue(0, 1, str(nmpts_pi_lst[field_counter-1]))
+            individual_measurements.SetValue(0, 2, str(num_grid_pts_lst[field_counter-1]))
+            individual_measurements.SetValue(0, 3, str(round(est_vol_frac_lst[field_counter-1],3)))
+            individual_measurements.Save(destfolder +r'\Tables\individual_measurements'+str(fldCount)+'.csv')
+        
+        
+            for i in range(field_counter):
+                individual_measurements_Total.SetValue(i, 0, str(i+1))
+                individual_measurements_Total.SetValue(i, 1, str(nmpts_pi_lst[i]))
+                individual_measurements_Total.SetValue(i, 2, str(num_grid_pts_lst[i]))
+                individual_measurements_Total.SetValue(i, 3, str(round(est_vol_frac_lst[i],3)))
+            
+    else:
+        individual_measurements.SetValue(0, 0, field_counter)
+        individual_measurements.SetValue(0, 1, str(nmpts_pi_lst[field_counter-1]))
+        individual_measurements.SetValue(0, 2, str(num_grid_pts_lst[field_counter-1]))
+        individual_measurements.SetValue(0, 3, str(round(est_vol_frac_lst[field_counter-1],3)))
+    
+        individual_measurements.Save(destfolder +r'\Tables\individual_measurements'+str(fldCount)+'.csv')
+        
+        for i in range(field_counter):
+            individual_measurements_Total.SetValue(i, 0, str(i+1))
+            individual_measurements_Total.SetValue(i, 1, str(nmpts_pi_lst[i]))
+            individual_measurements_Total.SetValue(i, 2, str(num_grid_pts_lst[i]))
+            individual_measurements_Total.SetValue(i, 3, str(round(est_vol_frac_lst[i],3)))
+
+## Overview Table
+##Zen.Application.ActiveWorkbench.SetOutputValue(overview_table,'overview_table')
+##Zen.Application.ActiveDocument = overview_table
+OVtableFileName = Path.Combine(destfolder,'overview_table.csv')
+overview_table.Save(OVtableFileName)   
+##
+## Total Individual Measurements Table
+##Zen.Application.ActiveWorkbench.SetOutputValue(individual_measurements_Total,'individual_measurements_Total')
+##Zen.Application.ActiveDocument = individual_measurements_Total
+tableFileName = Path.Combine(destfolder,'individual_measurements_Total.csv')
+individual_measurements_Total.Save(tableFileName)
+##
+if detMethod == 'Semi-automatic':
+    Zen.Application.ActiveWorkbench.SetOutputValue(field_counter-1, 'field_counter')
+else:    
+    Zen.Application.ActiveWorkbench.SetOutputValue(field_counter, 'field_counter')
+#print(field_counter)
+
+##################################################################################################################
+
+
+
+</Text>
+  <Author></Author>
+  <Description></Description>
+  <Keywords></Keywords>
+  <Row>950</Row>
+  <Column>1</Column>
+</Script>
